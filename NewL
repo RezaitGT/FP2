@@ -1,0 +1,292 @@
+import scala.concurrent.{Future, ExecutionContext, Await}
+import scala.concurrent.duration._
+import scala.util.{Success, Failure}
+import java.time.LocalDateTime
+
+case class Restaurant(id: String, name: String, tables: Int, cuisine: String)
+case class Customer(id: String, name: String, phone: String)
+case class Reservation(
+                        id: String,
+                        restaurantId: String,
+                        customerId: String,
+                        tableNumber: Int,
+                        reservationTime: LocalDateTime,
+                        numberOfGuests: Int,
+                        status: ReservationStatus
+                      )
+
+sealed trait ReservationStatus
+case object Pending extends ReservationStatus
+case object Confirmed extends ReservationStatus
+case object Cancelled extends ReservationStatus
+
+trait RestaurantFactory {
+  def createRestaurant(id: String, name: String, tables: Int): Restaurant
+}
+
+class ItalianRestaurantFactory extends RestaurantFactory {
+  override def createRestaurant(id: String, name: String, tables: Int): Restaurant =
+    Restaurant(id, name, tables, "Italian")
+}
+
+class JapaneseRestaurantFactory extends RestaurantFactory {
+  override def createRestaurant(id: String, name: String, tables: Int): Restaurant =
+    Restaurant(id, name, tables, "Japanese")
+}
+
+class SteakhouseRestaurantFactory extends RestaurantFactory {
+  override def createRestaurant(id: String, name: String, tables: Int): Restaurant =
+    Restaurant(id, name, tables, "Steakhouse")
+}
+
+class RestaurantRepository(implicit ec: ExecutionContext) {
+  private val restaurants = scala.collection.mutable.Map[String, Restaurant]()
+  private val factoryMap = Map(
+    "italian" -> new ItalianRestaurantFactory(),
+    "japanese" -> new JapaneseRestaurantFactory(),
+    "steakhouse" -> new SteakhouseRestaurantFactory()
+  )
+
+  def addRestaurant(
+                     id: String,
+                     name: String,
+                     tables: Int,
+                     cuisineType: String
+                   ): Future[Restaurant] = Future {
+    Thread.sleep(100)
+    val factory = factoryMap.getOrElse(cuisineType.toLowerCase,
+      new ItalianRestaurantFactory())
+    val restaurant = factory.createRestaurant(id, name, tables)
+    restaurants.put(id, restaurant)
+    restaurant
+  }
+
+  def findRestaurant(id: String): Future[Option[Restaurant]] = Future {
+    Thread.sleep(50)
+    restaurants.get(id)
+  }
+}
+
+class ReservationRepository(implicit ec: ExecutionContext) {
+  private val reservations = scala.collection.mutable.Map[String, Reservation]()
+  private val tableAvailability = scala.collection.mutable.Map[String, Set[Int]]()
+
+  def makeReservation(
+                       restaurantId: String,
+                       customerId: String,
+                       reservationTime: LocalDateTime,
+                       numberOfGuests: Int
+                     ): Future[Reservation] = Future {
+    Thread.sleep(200)
+
+    val availableTables = tableAvailability.getOrElse(restaurantId, Set.empty)
+    val allTables = (1 to 20).toSet
+    val freeTables = allTables.diff(availableTables)
+
+    if (freeTables.isEmpty) {
+      throw new Exception("Нет свободных столов")
+    }
+
+    val tableNumber = freeTables.head
+    val updatedAvailability = availableTables + tableNumber
+
+    val reservation = Reservation(
+      id = java.util.UUID.randomUUID().toString,
+      restaurantId = restaurantId,
+      customerId = customerId,
+      tableNumber = tableNumber,
+      reservationTime = reservationTime,
+      numberOfGuests = numberOfGuests,
+      status = Confirmed
+    )
+
+    reservations.put(reservation.id, reservation)
+    tableAvailability.put(restaurantId, updatedAvailability)
+
+    reservation
+  }
+
+  def cancelReservation(reservationId: String): Future[Boolean] = Future {
+    Thread.sleep(150)
+    reservations.get(reservationId) match {
+      case Some(reservation) if reservation.status != Cancelled =>
+        val updatedReservation = reservation.copy(status = Cancelled)
+        reservations.put(reservationId, updatedReservation)
+
+        val currentTables = tableAvailability.getOrElse(reservation.restaurantId, Set.empty)
+        tableAvailability.put(reservation.restaurantId,
+          currentTables - reservation.tableNumber)
+        true
+      case _ => false
+    }
+  }
+
+  def printAllReservations(): Unit = {
+    if (reservations.isEmpty) {
+      println("Нет активных бронирований")
+    } else {
+      println("\nТЕКУЩИЕ БРОНИРОВАНИЯ:")
+      println("-" * 30)
+      reservations.values.foreach { r =>
+        val status = r.status match {
+          case Confirmed => "[ПОДТВЕРЖДЕНО]"
+          case Cancelled => "[ОТМЕНЕНО]"
+          case Pending => "[ОЖИДАНИЕ]"
+        }
+        println(s"$status Стол #${r.tableNumber} | ${r.numberOfGuests} персон | Клиент: ${r.customerId}")
+      }
+    }
+  }
+}
+
+class ReservationService(
+                          restaurantRepo: RestaurantRepository,
+                          reservationRepo: ReservationRepository
+                        )(implicit ec: ExecutionContext) {
+
+  def createRestaurant(
+                        id: String,
+                        name: String,
+                        tables: Int,
+                        cuisineType: String
+                      ): Future[Restaurant] = {
+    restaurantRepo.addRestaurant(id, name, tables, cuisineType)
+  }
+
+  def bookTable(
+                 restaurantId: String,
+                 customer: Customer,
+                 reservationTime: LocalDateTime,
+                 numberOfGuests: Int
+               ): Future[Reservation] = {
+    for {
+      restaurantOpt <- restaurantRepo.findRestaurant(restaurantId)
+      restaurant <- restaurantOpt match {
+        case Some(r) => Future.successful(r)
+        case None => Future.failed(new Exception("Ресторан не найден"))
+      }
+
+      reservation <- reservationRepo.makeReservation(
+        restaurantId,
+        customer.id,
+        reservationTime,
+        numberOfGuests
+      )
+    } yield {
+      println(s"  > ${customer.name} забронировал столик в '${restaurant.name}'")
+      reservation
+    }
+  }
+
+  def cancelBooking(reservationId: String): Future[Boolean] = {
+    reservationRepo.cancelReservation(reservationId).map { success =>
+      if (success) println(s"  > Бронирование отменено")
+      success
+    }
+  }
+}
+
+object RestaurantBookingSystem extends App {
+  import scala.concurrent.ExecutionContext.Implicits.global
+
+  val restaurantRepo = new RestaurantRepository()
+  val reservationRepo = new ReservationRepository()
+  val bookingService = new ReservationService(restaurantRepo, reservationRepo)
+
+  println("=" * 40)
+  println("СИСТЕМА БРОНИРОВАНИЯ РЕСТОРАНОВ")
+  println("=" * 40)
+
+  val customers = List(
+    Customer("cust1", "Иван Иванов", "+79161234567"),
+    Customer("cust2", "Мария Петрова", "+79031234567"),
+    Customer("cust3", "Алексей Смирнов", "+79261234567"),
+    Customer("cust4", "Елена Ковалева", "+79171234567"),
+    Customer("cust5", "Дмитрий Новиков", "+79051234567")
+  )
+
+  println("\nСоздаем рестораны...")
+
+  val restaurantFutures = List(
+    bookingService.createRestaurant("r1", "Мама Миа", 15, "italian"),
+    bookingService.createRestaurant("r2", "Сакура", 12, "japanese"),
+    bookingService.createRestaurant("r3", "Стейк Хаус", 20, "steakhouse"),
+    bookingService.createRestaurant("r4", "Паста Бар", 10, "italian"),
+    bookingService.createRestaurant("r5", "Суши Мастер", 8, "japanese")
+  )
+
+
+  val restaurants = Await.result(Future.sequence(restaurantFutures), 5.seconds)
+
+  println(s"\nУспешно создано ${restaurants.size} ресторанов:")
+  restaurants.foreach(r => println(s"  • ${r.name} (${r.cuisine})"))
+
+  println("\n" + "=" * 40)
+  println("НАЧИНАЕМ БРОНИРОВАНИЕ СТОЛИКОВ")
+  println("=" * 40)
+
+  val tomorrow = LocalDateTime.now().plusDays(1)
+
+
+  val bookingFutures = List(
+
+    bookingService.bookTable("r1", customers(0), tomorrow.withHour(19).withMinute(0), 4),
+    bookingService.bookTable("r3", customers(0), tomorrow.withHour(21).withMinute(0), 6),
+
+    bookingService.bookTable("r2", customers(1), tomorrow.withHour(20).withMinute(30), 2),
+    bookingService.bookTable("r4", customers(1), tomorrow.plusDays(2).withHour(18).withMinute(0), 3),
+
+    bookingService.bookTable("r3", customers(2), tomorrow.withHour(20).withMinute(0), 5),
+    bookingService.bookTable("r5", customers(2), tomorrow.withHour(19).withMinute(30), 2),
+
+    bookingService.bookTable("r1", customers(3), tomorrow.withHour(18).withMinute(30), 4),
+    bookingService.bookTable("r2", customers(4), tomorrow.withHour(19).withMinute(45), 8)
+  )
+
+  try {
+    val reservations = Await.result(Future.sequence(bookingFutures), 10.seconds)
+
+    println("\n" + "=" * 40)
+    println("ИТОГИ БРОНИРОВАНИЯ")
+    println("=" * 40)
+
+    val bookingsByCustomer = reservations.groupBy(_.customerId)
+
+    customers.foreach { customer =>
+      val customerBookings = bookingsByCustomer.getOrElse(customer.id, Nil)
+      println(s"\n${customer.name}:")
+      if (customerBookings.nonEmpty) {
+        customerBookings.foreach { booking =>
+          println(s"  ✓ ${booking.numberOfGuests} персон")
+        }
+        println(s"  Всего: ${customerBookings.size} бронирований")
+      } else {
+        println("  (нет бронирований)")
+      }
+    }
+
+    reservationRepo.printAllReservations()
+
+    println("\n" + "=" * 40)
+    println("ДЕМОНСТРАЦИЯ ОТМЕНЫ БРОНИРОВАНИЯ")
+    println("=" * 40)
+
+    if (reservations.nonEmpty) {
+      val reservationToCancel = reservations.head.id
+      val cancelResult = Await.result(bookingService.cancelBooking(reservationToCancel), 3.seconds)
+
+      if (cancelResult) {
+        println("\nСтатус после отмены:")
+        reservationRepo.printAllReservations()
+      }
+    }
+
+  } catch {
+    case ex: Exception =>
+      println(s"\nОшибка при бронировании: ${ex.getMessage}")
+  }
+
+  println("\n" + "=" * 40)
+  println("РАБОТА СИСТЕМЫ ЗАВЕРШЕНА")
+  println("=" * 40)
+}
