@@ -1,7 +1,30 @@
 import scala.concurrent.{Future, ExecutionContext, Await}
 import scala.concurrent.duration._
-import scala.util.{Success, Failure}
 import java.time.LocalDateTime
+import scala.io.StdIn
+import scala.collection.immutable.LazyList
+
+case class MenuItem(id: String, description: String, action: () => Unit)
+
+case class Menu(title: String, items: List[MenuItem]) {
+  def printMenu(): Unit = {
+    println("\n" + "=" * 40)
+    println(title)
+    println("=" * 40)
+    items.foreach { item =>
+      println(s"${item.id}. ${item.description}")
+    }
+  }
+
+  def findItemById(id: String): Option[MenuItem] = {
+    items.find(_.id == id)
+  }
+
+  def isValidChoice(choice: String): Boolean = {
+    items.exists(_.id == choice)
+  }
+}
+
 
 case class Restaurant(id: String, name: String, tables: Int, cuisine: String)
 case class Customer(id: String, name: String, phone: String)
@@ -65,6 +88,15 @@ class RestaurantRepository(implicit ec: ExecutionContext) {
     Thread.sleep(50)
     restaurants.get(id)
   }
+
+  def getAllRestaurants(): Future[List[Restaurant]] = Future {
+    Thread.sleep(50)
+    restaurants.values.toList
+  }
+
+  def getRestaurantById(id: String): Option[Restaurant] = {
+    restaurants.get(id)
+  }
 }
 
 class ReservationRepository(implicit ec: ExecutionContext) {
@@ -121,20 +153,22 @@ class ReservationRepository(implicit ec: ExecutionContext) {
     }
   }
 
-  def printAllReservations(): Unit = {
-    if (reservations.isEmpty) {
-      println("Нет активных бронирований")
-    } else {
-      println("\nТЕКУЩИЕ БРОНИРОВАНИЯ:")
-      println("-" * 30)
-      reservations.values.foreach { r =>
-        val status = r.status match {
-          case Confirmed => "[ПОДТВЕРЖДЕНО]"
-          case Cancelled => "[ОТМЕНЕНО]"
-          case Pending => "[ОЖИДАНИЕ]"
-        }
-        println(s"$status Стол #${r.tableNumber} | ${r.numberOfGuests} персон | Клиент: ${r.customerId}")
-      }
+  def getAllReservations(): Future[List[Reservation]] = Future {
+    Thread.sleep(50)
+    reservations.values.toList
+  }
+
+  def getAllReservationsWithDetails(customers: List[Customer], restaurantRepo: RestaurantRepository): List[(Reservation, String, String)] = {
+    reservations.values.toList.map { r =>
+      val customerName = customers.find(_.id == r.customerId)
+        .map(_.name)
+        .getOrElse(s"ID: ${r.customerId}")
+
+      val restaurantName = restaurantRepo.getRestaurantById(r.restaurantId)
+        .map(_.name)
+        .getOrElse(s"ID: ${r.restaurantId}")
+
+      (r, customerName, restaurantName)
     }
   }
 }
@@ -186,16 +220,12 @@ class ReservationService(
   }
 }
 
-object RestaurantBookingSystem extends App {
+object RestaurantBookingSystem {
   import scala.concurrent.ExecutionContext.Implicits.global
 
   val restaurantRepo = new RestaurantRepository()
   val reservationRepo = new ReservationRepository()
   val bookingService = new ReservationService(restaurantRepo, reservationRepo)
-
-  println("=" * 40)
-  println("СИСТЕМА БРОНИРОВАНИЯ РЕСТОРАНОВ")
-  println("=" * 40)
 
   val customers = List(
     Customer("cust1", "Иван Иванов", "+79161234567"),
@@ -205,88 +235,205 @@ object RestaurantBookingSystem extends App {
     Customer("cust5", "Дмитрий Новиков", "+79051234567")
   )
 
-  println("\nСоздаем рестораны...")
-
-  val restaurantFutures = List(
-    bookingService.createRestaurant("r1", "Мама Миа", 15, "italian"),
-    bookingService.createRestaurant("r2", "Сакура", 12, "japanese"),
-    bookingService.createRestaurant("r3", "Стейк Хаус", 20, "steakhouse"),
-    bookingService.createRestaurant("r4", "Паста Бар", 10, "italian"),
-    bookingService.createRestaurant("r5", "Суши Мастер", 8, "japanese")
-  )
-
-
-  val restaurants = Await.result(Future.sequence(restaurantFutures), 5.seconds)
-
-  println(s"\nУспешно создано ${restaurants.size} ресторанов:")
-  restaurants.foreach(r => println(s"   ${r.name} (${r.cuisine})"))
-
-  println("\n" + "=" * 40)
-  println("НАЧИНАЕМ БРОНИРОВАНИЕ СТОЛИКОВ")
-  println("=" * 40)
-
-  val tomorrow = LocalDateTime.now().plusDays(1)
-
-
-  val bookingFutures = List(
-
-    bookingService.bookTable("r1", customers(0), tomorrow.withHour(19).withMinute(0), 4),
-    bookingService.bookTable("r3", customers(0), tomorrow.withHour(21).withMinute(0), 6),
-
-    bookingService.bookTable("r2", customers(1), tomorrow.withHour(20).withMinute(30), 2),
-    bookingService.bookTable("r4", customers(1), tomorrow.plusDays(2).withHour(18).withMinute(0), 3),
-
-    bookingService.bookTable("r3", customers(2), tomorrow.withHour(20).withMinute(0), 5),
-    bookingService.bookTable("r5", customers(2), tomorrow.withHour(19).withMinute(30), 2),
-
-    bookingService.bookTable("r1", customers(3), tomorrow.withHour(18).withMinute(30), 4),
-    bookingService.bookTable("r2", customers(4), tomorrow.withHour(19).withMinute(45), 8)
-  )
-
-  try {
-    val reservations = Await.result(Future.sequence(bookingFutures), 10.seconds)
-
+  def runTestOrder(): Unit = {
     println("\n" + "=" * 40)
-    println("ИТОГИ БРОНИРОВАНИЯ")
+    println("ВЫПОЛНЕНИЕ ТЕСТОВОГО ЗАКАЗА")
     println("=" * 40)
 
-    val bookingsByCustomer = reservations.groupBy(_.customerId)
+    println("\nСоздаем рестораны...")
 
-    customers.foreach { customer =>
-      val customerBookings = bookingsByCustomer.getOrElse(customer.id, Nil)
-      println(s"\n${customer.name}:")
-      if (customerBookings.nonEmpty) {
-        customerBookings.foreach { booking =>
-          println(s"  ${booking.numberOfGuests} персон")
+    val restaurantFutures = List(
+      bookingService.createRestaurant("r1", "Мама Миа", 15, "italian"),
+      bookingService.createRestaurant("r2", "Сакура", 12, "japanese"),
+      bookingService.createRestaurant("r3", "Стейк Хаус", 20, "steakhouse"),
+      bookingService.createRestaurant("r4", "Паста Бар", 10, "italian"),
+      bookingService.createRestaurant("r5", "Суши Мастер", 8, "japanese")
+    )
+
+    val restaurants = Await.result(Future.sequence(restaurantFutures), 5.seconds)
+
+    println(s"\nУспешно создано ${restaurants.size} ресторанов:")
+    restaurants.foreach(r => println(s"   ${r.name} (${r.cuisine})"))
+
+    println("\n" + "=" * 40)
+    println("НАЧИНАЕМ БРОНИРОВАНИЕ СТОЛИКОВ")
+    println("=" * 40)
+
+    val tomorrow = LocalDateTime.now().plusDays(1)
+
+    val bookingFutures = List(
+      bookingService.bookTable("r1", customers(0), tomorrow.withHour(19).withMinute(0), 4),
+      bookingService.bookTable("r3", customers(0), tomorrow.withHour(21).withMinute(0), 6),
+      bookingService.bookTable("r2", customers(1), tomorrow.withHour(20).withMinute(30), 2),
+      bookingService.bookTable("r4", customers(1), tomorrow.plusDays(2).withHour(18).withMinute(0), 3),
+      bookingService.bookTable("r3", customers(2), tomorrow.withHour(20).withMinute(0), 5),
+      bookingService.bookTable("r5", customers(2), tomorrow.withHour(19).withMinute(30), 2),
+      bookingService.bookTable("r1", customers(3), tomorrow.withHour(18).withMinute(30), 4),
+      bookingService.bookTable("r2", customers(4), tomorrow.withHour(19).withMinute(45), 8)
+    )
+
+    try {
+      val reservations = Await.result(Future.sequence(bookingFutures), 10.seconds)
+
+      println("\n" + "=" * 40)
+      println("ИТОГИ БРОНИРОВАНИЯ")
+      println("=" * 40)
+
+      val bookingsByCustomer = reservations.groupBy(_.customerId)
+
+      customers.foreach { customer =>
+        val customerBookings = bookingsByCustomer.getOrElse(customer.id, Nil)
+        println(s"\n${customer.name}:")
+        if (customerBookings.nonEmpty) {
+          customerBookings.foreach { booking =>
+            println(s"  ${booking.numberOfGuests} персон")
+          }
+          println(s"  Всего: ${customerBookings.size} бронирований")
+        } else {
+          println("  (нет бронирований)")
         }
-        println(s"  Всего: ${customerBookings.size} бронирований")
-      } else {
-        println("  (нет бронирований)")
       }
+
+      showAllReservations()
+
+      println("\n" + "=" * 40)
+      println("ДЕМОНСТРАЦИЯ ОТМЕНЫ БРОНИРОВАНИЯ")
+      println("=" * 40)
+
+      if (reservations.nonEmpty) {
+        val reservationToCancel = reservations.head.id
+        val cancelResult = Await.result(bookingService.cancelBooking(reservationToCancel), 3.seconds)
+
+        if (cancelResult) {
+          println("\nСтатус после отмены:")
+          showAllReservations()
+        }
+      }
+
+    } catch {
+      case ex: Exception =>
+        println(s"\nОшибка при бронировании: ${ex.getMessage}")
     }
 
-    reservationRepo.printAllReservations()
-
-    println("\n" + "=" * 40)
-    println("ДЕМОНСТРАЦИЯ ОТМЕНЫ БРОНИРОВАНИЯ")
-    println("=" * 40)
-
-    if (reservations.nonEmpty) {
-      val reservationToCancel = reservations.head.id
-      val cancelResult = Await.result(bookingService.cancelBooking(reservationToCancel), 3.seconds)
-
-      if (cancelResult) {
-        println("\nСтатус после отмены:")
-        reservationRepo.printAllReservations()
-      }
-    }
-
-  } catch {
-    case ex: Exception =>
-      println(s"\nОшибка при бронировании: ${ex.getMessage}")
+    println("\nОперация завершена. Возвращаюсь в главное меню...")
+    Thread.sleep(1000)
   }
 
-  println("\n" + "=" * 40)
-  println("РАБОТА СИСТЕМЫ ЗАВЕРШЕНА")
-  println("=" * 40)
+  def showAllReservations(): Unit = {
+    val reservations = reservationRepo.getAllReservationsWithDetails(customers, restaurantRepo)
+
+    if (reservations.isEmpty) {
+      println("\nНет активных бронирований")
+    } else {
+      println("\n" + "=" * 60)
+      println("ВСЕ ЗАБРОНИРОВАННЫЕ СТОЛИКИ")
+      println("=" * 60)
+
+      val sortedReservations = reservations.sortBy(_._1.tableNumber)
+
+      sortedReservations.foreach { case (r, customerName, restaurantName) =>
+        val status = r.status match {
+          case Confirmed => "[ПОДТВЕРЖДЕНО]"
+          case Cancelled => "[ОТМЕНЕНО]"
+          case Pending => "[ОЖИДАНИЕ]"
+        }
+
+        println(f"$status Стол #${r.tableNumber}%2d")
+        println(f"  Количество персон: ${r.numberOfGuests}%2d")
+        println(f"  Клиент: $customerName")
+        println(f"  Ресторан: $restaurantName")
+        println("-" * 40)
+      }
+      println(s"Всего бронирований: ${reservations.size}")
+    }
+  }
+
+  def showCustomersInfo(): Unit = {
+    println("\n" + "=" * 40)
+    println("ИНФОРМАЦИЯ О ЗАКАЗЧИКАХ")
+    println("=" * 40)
+
+    customers.foreach { customer =>
+      println(s"\nID: ${customer.id}")
+      println(s"Имя: ${customer.name}")
+      println(s"Телефон: ${customer.phone}")
+    }
+    println(s"\nВсего заказчиков: ${customers.size}")
+  }
+
+  def exitProgram(): Unit = {
+    println("\nЗавершение работы программы...")
+  }
+
+  def waitForEnter(): Unit = {
+    println("\nНажмите Enter для продолжения...")
+  }
+
+
+  private lazy val mainMenu: Menu = Menu("СИСТЕМА БРОНИРОВАНИЯ РЕСТОРАНОВ", List(
+    MenuItem("1", "Тестовый заказ (создание ресторанов и бронирование)",
+      () => {
+        runTestOrder()
+        waitForEnter()
+      }),
+    MenuItem("2", "Посмотреть забронированные столики",
+      () => {
+        showAllReservations()
+        waitForEnter()
+      }),
+    MenuItem("3", "Посмотреть информацию о заказчиках",
+      () => {
+        showCustomersInfo()
+        waitForEnter()
+      }),
+    MenuItem("4", "Выход",
+      () => exitProgram())
+  ))
+
+  def readMenuChoice(menu: Menu, stream: LazyList[String]): (String, LazyList[String]) = {
+    print("Ваш выбор: ")
+
+    def processInput(inputStream: LazyList[String]): (String, LazyList[String]) = {
+      val choice = inputStream.head.trim
+      val tailStream = inputStream.tail
+
+      if (menu.isValidChoice(choice)) {
+        (choice, tailStream)
+      } else {
+        println(s"Неверный выбор. Пожалуйста, введите один из вариантов: ${menu.items.map(_.id).mkString(", ")}")
+        print("Ваш выбор: ")
+        processInput(tailStream)
+      }
+    }
+
+    processInput(stream)
+  }
+
+
+  def mainLoop(stream: LazyList[String]): Unit = {
+    mainMenu.printMenu()
+    val (choice, remainingStream) = readMenuChoice(mainMenu, stream)
+    mainMenu.findItemById(choice) match {
+      case Some(menuItem) =>
+        menuItem.action()
+        if (choice != "4") {
+          val newStream = if (remainingStream.nonEmpty) remainingStream.tail else remainingStream
+          mainLoop(newStream)
+        }
+      case None =>
+        println("Ошибка: пункт меню не найден")
+        mainLoop(remainingStream)
+    }
+  }
+
+  def main(args: Array[String]): Unit = {
+    val mainInputStream: LazyList[String] = LazyList.continually(StdIn.readLine())
+    println("\n" + "=" * 40)
+    println("ЗАПУСК СИСТЕМЫ БРОНИРОВАНИЯ РЕСТОРАНОВ")
+    println("=" * 40)
+    mainLoop(mainInputStream)
+    println("\n" + "=" * 40)
+    println("РАБОТА СИСТЕМЫ ЗАВЕРШЕНА")
+    println("=" * 40)
+  }
 }
